@@ -263,6 +263,65 @@ def _first_hit(src_cell: frozenset[int],
     return min(common)
 
 
+def _merge_boxes(labels: list[int], ns: int, nd: int, np_: int
+                 ) -> list[tuple[int, tuple[int, int, int], tuple[int, int, int]]]:
+    """
+    把扁平标签数组（行优先：源 → 目的 → 端口）中相同非负标签的相邻基本单元
+    贪心合并成长方体；标签 < 0 的单元被跳过（不参与任何块）。
+
+    扫描顺序与扩展方向固定（端口 → 目的 → 源），输出完全确定。
+    返回 [(标签, (si, di, pi), (s_hi, d_hi, p_hi)), ...]，按扫描顺序排列；
+    块两两互不重叠，且恰好覆盖所有非负标签单元。
+    """
+    total = ns * nd * np_
+    used = bytearray(total)
+
+    def idx(si: int, di: int, pi: int) -> int:
+        return (si * nd + di) * np_ + pi
+
+    def strip_same(si: int, di: int, p_lo: int, p_hi: int, code: int) -> bool:
+        base = idx(si, di, p_lo)
+        for k in range(p_hi - p_lo + 1):
+            if used[base + k] or labels[base + k] != code:
+                return False
+        return True
+
+    def slab_same(si: int, d_lo: int, d_hi: int, p_lo: int, p_hi: int,
+                  code: int) -> bool:
+        for d2 in range(d_lo, d_hi + 1):
+            if not strip_same(si, d2, p_lo, p_hi, code):
+                return False
+        return True
+
+    boxes: list[tuple[int, tuple[int, int, int], tuple[int, int, int]]] = []
+    for si in range(ns):
+        for di in range(nd):
+            for pi in range(np_):
+                start = idx(si, di, pi)
+                code = labels[start]
+                if code < 0 or used[start]:
+                    continue
+                # 端口方向扩展
+                p_hi = pi
+                while p_hi + 1 < np_ and not used[idx(si, di, p_hi + 1)] \
+                        and labels[idx(si, di, p_hi + 1)] == code:
+                    p_hi += 1
+                # 目的方向扩展：要求整段端口条带同标签
+                d_hi = di
+                while d_hi + 1 < nd and strip_same(si, d_hi + 1, pi, p_hi, code):
+                    d_hi += 1
+                # 源方向扩展：要求整个 (目的 × 端口) 切片同标签
+                s_hi = si
+                while s_hi + 1 < ns and slab_same(s_hi + 1, di, d_hi, pi, p_hi, code):
+                    s_hi += 1
+                for s2 in range(si, s_hi + 1):
+                    for d2 in range(di, d_hi + 1):
+                        base = idx(s2, d2, pi)
+                        used[base:base + (p_hi - pi + 1)] = b"\x01" * (p_hi - pi + 1)
+                boxes.append((code, (si, di, pi), (s_hi, d_hi, p_hi)))
+    return boxes
+
+
 # --------------------------------------------------------------------------- #
 # 区域序列化辅助
 # --------------------------------------------------------------------------- #
@@ -298,6 +357,26 @@ def _hit_json(rule_index: int, rules: list[Rule], action: str) -> dict[str, Any]
     rule = rules[rule_index]
     return {"matched": True, "ruleId": rule.id, "ruleOrder": rule.order + 1,
             "action": action, "defaultDeny": False}
+
+
+def _region_json(s_lo: int, s_hi: int, d_lo: int, d_hi: int,
+                 p_lo: int, p_hi: int) -> dict[str, Any]:
+    """一个三维长方体区域的可序列化描述，附代表报文（各区间最小端点）。"""
+    packet_count = (s_hi - s_lo + 1) * (d_hi - d_lo + 1) * (p_hi - p_lo + 1)
+    port_field = str(p_lo) if p_lo == p_hi else f"{p_lo}-{p_hi}"
+    return {
+        "source": _ip_interval_json(s_lo, s_hi),
+        "destination": _ip_interval_json(d_lo, d_hi),
+        "port": {"start": p_lo, "end": p_hi, "label": port_field,
+                 "portCount": p_hi - p_lo + 1},
+        "packetCount": str(packet_count),
+        "representativePacket": {
+            "protocol": "TCP",
+            "sourceIp": _ip_str(s_lo),
+            "destinationIp": _ip_str(d_lo),
+            "destinationPort": p_lo,
+        },
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -348,19 +427,13 @@ def diff_rulesets(old_rules: list[Rule], new_rules: list[Rule]) -> dict[str, Any
     new_dst_cells = _cell_hit_sets(nd, new_dst_mem)
     new_port_cells = _cell_hit_sets(np_, new_port_mem)
 
-    # 3) 给每个基本单元打上 (旧命中索引, 新命中索引) 标签，编码为单个 int
+    # 3) 给每个基本单元打上 (旧命中索引, 新命中索引) 标签；
+    #    动作未变化的单元记为跳过（-1）。
+    #    同一标签意味着旧命中规则与新命中规则（含默认拒绝）完全一致。
     total = ns * nd * np_
-    labels = [0] * total
+    labels = [-1] * total
     label_map: dict[tuple[int, int], int] = {}
     label_pairs: list[tuple[int, int]] = []
-
-    def code_for(pair: tuple[int, int]) -> int:
-        code = label_map.get(pair)
-        if code is None:
-            code = len(label_pairs) + 1
-            label_map[pair] = code
-            label_pairs.append(pair)
-        return code
 
     flat = 0
     for si in range(ns):
@@ -370,86 +443,32 @@ def diff_rulesets(old_rules: list[Rule], new_rules: list[Rule]) -> dict[str, Any
                                      old_dst_cells[di], old_port_cells[pi])
                 new_hit = _first_hit(new_src_cells[si],
                                      new_dst_cells[di], new_port_cells[pi])
-                labels[flat] = code_for((old_hit, new_hit))
-                flat += 1
-
-    # 4) 贪心合并：字典序扫描未处理单元，沿端口→目的→源方向吃掉同标签相邻单元。
-    #    同标签意味着旧命中规则与新命中规则（含默认拒绝）完全一致。
-    used = bytearray(total)
-
-    def idx(si: int, di: int, pi: int) -> int:
-        return (si * nd + di) * np_ + pi
-
-    def idx_used(si: int, di: int, pi: int) -> int:
-        return used[idx(si, di, pi)]
-
-    def strip_same(si: int, di: int, p_lo: int, p_hi: int, code: int) -> bool:
-        base = idx(si, di, p_lo)
-        for k in range(p_hi - p_lo + 1):
-            if used[base + k] or labels[base + k] != code:
-                return False
-        return True
-
-    def slab_same(si: int, d_lo: int, d_hi: int, p_lo: int, p_hi: int,
-                  code: int) -> bool:
-        for d2 in range(d_lo, d_hi + 1):
-            if not strip_same(si, d2, p_lo, p_hi, code):
-                return False
-        return True
-
-    raw_blocks: list[dict[str, Any]] = []
-
-    for si in range(ns):
-        for di in range(nd):
-            for pi in range(np_):
-                start = idx(si, di, pi)
-                if used[start]:
-                    continue
-                code = labels[start]
-                old_hit, new_hit = label_pairs[code - 1]
-
                 old_action = old_rules[old_hit].action if old_hit >= 0 else "deny"
                 new_action = new_rules[new_hit].action if new_hit >= 0 else "deny"
-                if old_action == new_action:
-                    # 动作未变化的单元也标记为已处理，但不输出
-                    used[start] = 1
-                    continue
+                if old_action != new_action:
+                    pair = (old_hit, new_hit)
+                    code = label_map.get(pair)
+                    if code is None:
+                        code = len(label_pairs)
+                        label_map[pair] = code
+                        label_pairs.append(pair)
+                    labels[flat] = code
+                flat += 1
 
-                # 端口方向扩展
-                p_hi = pi
-                while p_hi + 1 < np_ and not idx_used(si, di, p_hi + 1) \
-                        and labels[idx(si, di, p_hi + 1)] == code:
-                    p_hi += 1
-                # 目的方向扩展：要求整段端口条带同标签
-                d_hi = di
-                while d_hi + 1 < nd:
-                    if strip_same(si, d_hi + 1, pi, p_hi, code):
-                        d_hi += 1
-                    else:
-                        break
-                # 源方向扩展：要求整个 (目的 × 端口) 切片同标签
-                s_hi = si
-                while s_hi + 1 < ns:
-                    if slab_same(s_hi + 1, di, d_hi, pi, p_hi, code):
-                        s_hi += 1
-                    else:
-                        break
-
-                for s2 in range(si, s_hi + 1):
-                    for d2 in range(di, d_hi + 1):
-                        base = idx(s2, d2, pi)
-                        used[base:base + (p_hi - pi + 1)] = b"\x01" * (p_hi - pi + 1)
-
-                raw_blocks.append({
-                    "src": (src_intervals[si][0], src_intervals[s_hi][1]),
-                    "dst": (dst_intervals[di][0], dst_intervals[d_hi][1]),
-                    "port": (port_intervals[pi][0], port_intervals[p_hi][1]),
-                    "oldHit": old_hit,
-                    "newHit": new_hit,
-                    # 记录数值边界用于确定性排序
-                    "_sort": (src_intervals[si][0], dst_intervals[di][0],
-                              port_intervals[pi][0]),
-                })
+    # 4) 贪心合并同标签相邻单元为长方体区域
+    raw_blocks: list[dict[str, Any]] = []
+    for code, lo, hi in _merge_boxes(labels, ns, nd, np_):
+        old_hit, new_hit = label_pairs[code]
+        raw_blocks.append({
+            "src": (src_intervals[lo[0]][0], src_intervals[hi[0]][1]),
+            "dst": (dst_intervals[lo[1]][0], dst_intervals[hi[1]][1]),
+            "port": (port_intervals[lo[2]][0], port_intervals[hi[2]][1]),
+            "oldHit": old_hit,
+            "newHit": new_hit,
+            # 记录数值边界用于确定性排序
+            "_sort": (src_intervals[lo[0]][0], dst_intervals[lo[1]][0],
+                      port_intervals[lo[2]][0]),
+        })
 
     # 5) 序列化：每块取各区间最小端点作为具体报文（块内命中结果恒定）
     raw_blocks.sort(key=lambda b: b["_sort"])
@@ -462,21 +481,9 @@ def diff_rulesets(old_rules: list[Rule], new_rules: list[Rule]) -> dict[str, Any
         old_action = old_rules[old_hit].action if old_hit >= 0 else "deny"
         new_action = new_rules[new_hit].action if new_hit >= 0 else "deny"
 
-        packet_count = (s_hi - s_lo + 1) * (d_hi - d_lo + 1) * (p_hi - p_lo + 1)
-        port_field = (str(p_lo) if p_lo == p_hi else f"{p_lo}-{p_hi}")
         blocks.append({
             "changeType": "newly-allowed" if new_action == "allow" else "newly-denied",
-            "source": _ip_interval_json(s_lo, s_hi),
-            "destination": _ip_interval_json(d_lo, d_hi),
-            "port": {"start": p_lo, "end": p_hi, "label": port_field,
-                     "portCount": p_hi - p_lo + 1},
-            "packetCount": str(packet_count),
-            "representativePacket": {
-                "protocol": "TCP",
-                "sourceIp": _ip_str(s_lo),
-                "destinationIp": _ip_str(d_lo),
-                "destinationPort": p_lo,
-            },
+            **_region_json(s_lo, s_hi, d_lo, d_hi, p_lo, p_hi),
             "oldVerdict": _hit_json(old_hit, old_rules, old_action),
             "newVerdict": _hit_json(new_hit, new_rules, new_action),
         })
@@ -513,3 +520,220 @@ def analyze(old_text: str, new_text: str) -> dict[str, Any]:
     if old_errors or new_errors:
         raise ValidationFailure(old_errors + new_errors)
     return diff_rulesets(old_rules, new_rules)
+
+
+# --------------------------------------------------------------------------- #
+# 规则有效性审计
+# --------------------------------------------------------------------------- #
+def _percent_str(part: int, whole: int) -> str:
+    """整数百分比（两位小数字符串），要求 whole > 0。"""
+    v = part * 10000 // whole
+    return f"{v // 100}.{v % 100:02d}"
+
+
+def _audit_suggestion(rule: Rule, status: str, has_conflict: bool,
+                      shadowed_by: list[dict[str, Any]],
+                      eff_count: int, declared_count: int) -> str:
+    """根据审计结论给出重排 / 删除建议。"""
+    if status == "fully-effective":
+        return "完全生效：声明区域内没有任何前置规则竞争，无需调整。"
+
+    def orders_of(relation: Optional[str]) -> str:
+        return "、".join(f"#{a['ruleOrder']}" for a in shadowed_by
+                         if relation is None or a["relation"] == relation)
+
+    if status == "fully-shadowed":
+        if has_conflict:
+            return (f"完全遮蔽：该规则永远不会命中任何报文——声明区域被动作相反的前置规则 "
+                    f"{orders_of('conflict')} 完全覆盖（本规则为 {rule.action}）。"
+                    "若这些流量确应按本规则处理，请将本规则移到遮蔽规则之前；"
+                    "否则建议删除。")
+        return (f"完全遮蔽（冗余）：声明区域被动作相同的前置规则 {orders_of(None)} "
+                "完全覆盖，删除本规则不会改变任何报文的判定，建议删除以精简规则表。")
+
+    # partially-effective
+    pct = _percent_str(eff_count, declared_count)
+    if has_conflict:
+        return (f"部分生效：仅 {pct}% 的声明报文真正由本规则处理，其余区域被动作相反的"
+                f"前置规则 {orders_of('conflict')} 覆盖（冲突）。若被覆盖区域应按本规则"
+                "处理，请将本规则前移或拆分为更精确的规则；否则可缩小本规则范围。")
+    return (f"部分生效：仅 {pct}% 的声明报文真正由本规则处理，其余区域由动作相同的"
+            "前置规则处理。可缩小本规则范围或删除被覆盖部分，保持规则表简洁。")
+
+
+def audit_ruleset(rules: list[Rule]) -> dict[str, Any]:
+    """
+    对单份有序规则集做有效性审计（首条命中语义，不做抽样）：
+
+      * 每条规则的「生效区域」= 其声明区域中由它首条命中的部分，
+        在源地址 × 目的地址 × 目的端口三个维度上精确给出；
+      * 声明区域的其余部分必然被某条前置规则首条命中（遮蔽），按遮蔽来源
+        分组输出，并标记动作关系：conflict（allow/deny 冲突）或
+        same-action（动作一致，属冗余覆盖）；
+      * 对每条规则：生效区域 ∪ 被遮蔽区域 = 声明区域，且两两互不重叠；
+        每个区域块附代表报文（各区间最小端点），其命中规则即整块内任意
+        报文的命中规则。
+    """
+    n = len(rules)
+    src_ranges = [(int(r.source.network_address), int(r.source.broadcast_address))
+                  for r in rules]
+    dst_ranges = [(int(r.destination.network_address), int(r.destination.broadcast_address))
+                  for r in rules]
+    port_ranges = [(r.port_low, r.port_high) for r in rules]
+
+    src_intervals = _interval_bounds(src_ranges, 2 ** 32 - 1)
+    dst_intervals = _interval_bounds(dst_ranges, 2 ** 32 - 1)
+    port_intervals = _interval_bounds(port_ranges, PORT_MAX)
+    ns, nd, np_ = len(src_intervals), len(dst_intervals), len(port_intervals)
+
+    src_mem = _memberships(src_intervals, src_ranges)
+    dst_mem = _memberships(dst_intervals, dst_ranges)
+    port_mem = _memberships(port_intervals, port_ranges)
+    src_cells = _cell_hit_sets(ns, src_mem)
+    dst_cells = _cell_hit_sets(nd, dst_mem)
+    port_cells = _cell_hit_sets(np_, port_mem)
+
+    # 每个基本单元的首条命中规则索引（-1 = 默认拒绝，不属于任何规则）
+    total = ns * nd * np_
+    first = [-1] * total
+    flat = 0
+    for si in range(ns):
+        for di in range(nd):
+            for pi in range(np_):
+                first[flat] = _first_hit(src_cells[si], dst_cells[di],
+                                         port_cells[pi])
+                flat += 1
+
+    # 全部规则的生效区域：按首条命中标签一次性合并，再按规则分组
+    effective_boxes: list[list[tuple[tuple[int, int, int],
+                                     tuple[int, int, int]]]] = [[] for _ in range(n)]
+    for code, lo, hi in _merge_boxes(first, ns, nd, np_):
+        effective_boxes[code].append((lo, hi))
+
+    def box_bounds(lo: tuple[int, int, int], hi: tuple[int, int, int]
+                   ) -> tuple[int, int, int, int, int, int]:
+        return (src_intervals[lo[0]][0], src_intervals[hi[0]][1],
+                dst_intervals[lo[1]][0], dst_intervals[hi[1]][1],
+                port_intervals[lo[2]][0], port_intervals[hi[2]][1])
+
+    status_counts = {"fully-effective": 0, "partially-effective": 0,
+                     "fully-shadowed": 0}
+    conflict_rules = 0
+    redundant_rules = 0
+    reports: list[dict[str, Any]] = []
+
+    for i, rule in enumerate(rules):
+        s_lo_d = int(rule.source.network_address)
+        s_hi_d = int(rule.source.broadcast_address)
+        d_lo_d = int(rule.destination.network_address)
+        d_hi_d = int(rule.destination.broadcast_address)
+        declared_count = ((s_hi_d - s_lo_d + 1) * (d_hi_d - d_lo_d + 1)
+                          * (rule.port_high - rule.port_low + 1))
+
+        # 生效区域序列化
+        eff_json: list[dict[str, Any]] = []
+        eff_count = 0
+        for lo, hi in effective_boxes[i]:
+            blk = _region_json(*box_bounds(lo, hi))
+            eff_count += int(blk["packetCount"])
+            eff_json.append(blk)
+
+        # 遮蔽区域：仅取本规则声明区域内、首条命中为前置规则的单元，
+        # 按遮蔽来源（前置规则索引）分组合并
+        s0, s1 = src_mem[i][0], src_mem[i][-1]
+        d0, d1 = dst_mem[i][0], dst_mem[i][-1]
+        p0, p1 = port_mem[i][0], port_mem[i][-1]
+        shadow_labels = [-1] * total
+        for si in range(s0, s1 + 1):
+            for di in range(d0, d1 + 1):
+                base = (si * nd + di) * np_
+                for pi in range(p0, p1 + 1):
+                    h = first[base + pi]
+                    if 0 <= h < i:
+                        shadow_labels[base + pi] = h
+
+        shd_json: list[dict[str, Any]] = []
+        shd_count = 0
+        shadower_agg: dict[int, dict[str, Any]] = {}
+        for code, lo, hi in _merge_boxes(shadow_labels, ns, nd, np_):
+            blk = _region_json(*box_bounds(lo, hi))
+            cnt = int(blk["packetCount"])
+            shd_count += cnt
+            sh = rules[code]
+            relation = "conflict" if sh.action != rule.action else "same-action"
+            blk["shadowedBy"] = {"ruleId": sh.id, "ruleOrder": code + 1,
+                                 "action": sh.action}
+            blk["relation"] = relation
+            shd_json.append(blk)
+            agg = shadower_agg.get(code)
+            if agg is None:
+                agg = {"ruleId": sh.id, "ruleOrder": code + 1, "action": sh.action,
+                       "relation": relation, "packetCount": 0, "blockCount": 0}
+                shadower_agg[code] = agg
+            agg["packetCount"] += cnt
+            agg["blockCount"] += 1
+
+        shadowed_by = [{**agg, "packetCount": str(agg["packetCount"])}
+                       for _, agg in sorted(shadower_agg.items())]
+
+        # 分类：完全生效 / 部分生效 / 完全遮蔽
+        if eff_count == 0:
+            status = "fully-shadowed"
+        elif eff_count == declared_count:
+            status = "fully-effective"
+        else:
+            status = "partially-effective"
+        status_counts[status] += 1
+        has_conflict = any(a["relation"] == "conflict" for a in shadowed_by)
+        if has_conflict:
+            conflict_rules += 1
+        if status == "fully-shadowed" and not has_conflict:
+            redundant_rules += 1
+
+        reports.append({
+            "ruleIndex": i + 1,
+            "ruleId": rule.id,
+            "action": rule.action,
+            "status": status,
+            "actionConflict": has_conflict,
+            "declared": {
+                "source": _ip_interval_json(s_lo_d, s_hi_d),
+                "destination": _ip_interval_json(d_lo_d, d_hi_d),
+                "port": {
+                    "start": rule.port_low,
+                    "end": rule.port_high,
+                    "label": (str(rule.port_low) if rule.port_low == rule.port_high
+                              else f"{rule.port_low}-{rule.port_high}"),
+                    "portCount": rule.port_high - rule.port_low + 1,
+                },
+            },
+            "declaredPacketCount": str(declared_count),
+            "effectivePacketCount": str(eff_count),
+            "shadowedPacketCount": str(shd_count),
+            "effectivePercent": _percent_str(eff_count, declared_count),
+            "shadowedPercent": _percent_str(shd_count, declared_count),
+            "effectiveBlocks": eff_json,
+            "shadowedBlocks": shd_json,
+            "shadowedBy": shadowed_by,
+            "suggestion": _audit_suggestion(rule, status, has_conflict,
+                                            shadowed_by, eff_count,
+                                            declared_count),
+        })
+
+    return {
+        "summary": {
+            "ruleCount": n,
+            "fullyEffectiveCount": status_counts["fully-effective"],
+            "partiallyEffectiveCount": status_counts["partially-effective"],
+            "fullyShadowedCount": status_counts["fully-shadowed"],
+            "conflictRuleCount": conflict_rules,
+            "redundantRuleCount": redundant_rules,
+        },
+        "rules": reports,
+    }
+
+
+def analyze_audit(text: str) -> dict[str, Any]:
+    """审计入口：输入非法即抛 ValidationFailure（前端据此定位字段并清空旧结果）。"""
+    rules = parse_ruleset(text, "rules")
+    return audit_ruleset(rules)

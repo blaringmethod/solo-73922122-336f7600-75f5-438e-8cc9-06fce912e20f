@@ -81,9 +81,21 @@
   .summary-bar b { color: var(--accent); }
   .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
   .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  .topnav { display: flex; gap: 6px; padding: 12px 28px 0; }
+  .topnav a {
+    color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 600;
+    padding: 7px 16px; border: 1px solid var(--line); border-bottom: none;
+    border-radius: 8px 8px 0 0; background: var(--panel);
+  }
+  .topnav a:hover { color: var(--accent); }
+  .topnav a.active { color: var(--accent); background: var(--panel2); }
 </style>
 </head>
 <body>
+<nav class="topnav">
+  <a href="/" class="active">变更差分</a>
+  <a href="/audit">规则有效性审计</a>
+</nav>
 <header>
   <h1>防火墙规则变更差分台（IPv4 / TCP，首条匹配，默认拒绝）</h1>
   <p>粘贴旧、新两份有序 JSON 规则（各 ≤ 20 条），系统用边界切分精确枚举整个流量空间，输出全部且互不重叠的新增放行 / 新增阻断区域，不做抽样。</p>

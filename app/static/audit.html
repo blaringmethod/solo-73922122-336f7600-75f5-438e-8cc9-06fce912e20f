@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>规则有效性审计 · 防火墙规则工作台</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --panel2: #273449; --line: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8;
+    --allow: #16a34a; --allow-bg: #052e16; --deny: #dc2626; --deny-bg: #2a0a0a;
+    --warn: #f59e0b; --warn-bg: #2b1d05; --err-bg: #3f1414; --err-line: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .topnav { display: flex; gap: 6px; padding: 12px 28px 0; }
+  .topnav a {
+    color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 600;
+    padding: 7px 16px; border: 1px solid var(--line); border-bottom: none;
+    border-radius: 8px 8px 0 0; background: var(--panel);
+  }
+  .topnav a:hover { color: var(--accent); }
+  .topnav a.active { color: var(--accent); background: var(--panel2); }
+  header { padding: 20px 28px 12px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0 0 6px; font-size: 20px; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  main { padding: 20px 28px 60px; max-width: 1500px; margin: 0 auto; }
+  .toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 8px 16px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: #0369a1; border-color: #0ea5e9; color: #fff; }
+  button.primary:hover { background: #0284c7; color: #fff; }
+  .editor-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .editor-card h2 { margin: 0; padding: 10px 14px; font-size: 14px; background: var(--panel2); border-bottom: 1px solid var(--line); }
+  textarea {
+    width: 100%; min-height: 300px; resize: vertical; border: 0; outline: none;
+    background: #0b1220; color: #dbeafe; font: 12px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    padding: 12px 14px;
+  }
+  .schema-help {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 16px; margin: 16px 0; color: var(--muted); font-size: 12.5px;
+  }
+  .schema-help code { color: var(--accent); }
+  .schema-help pre {
+    background: #0b1220; border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; overflow-x: auto; color: #cbd5e1; margin: 8px 0 0;
+  }
+  #errors { display: none; margin: 16px 0; border: 1px solid var(--err-line); background: var(--err-bg); border-radius: 10px; padding: 12px 16px; }
+  #errors.show { display: block; }
+  #errors h3 { margin: 0 0 8px; color: #fca5a5; font-size: 14px; }
+  #errors ul { margin: 0; padding-left: 18px; }
+  #errors li { margin: 4px 0; }
+  .loc { color: var(--warn); font-weight: 600; }
+  #results { margin-top: 22px; }
+  .summary-bar { display: flex; gap: 18px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 18px; margin-bottom: 14px; font-size: 13px; }
+  .summary-bar b { color: var(--accent); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .badge.allow { background: var(--allow-bg); color: #4ade80; border: 1px solid var(--allow); }
+  .badge.deny { background: var(--deny-bg); color: #f87171; border: 1px solid var(--deny); }
+  .badge.ok { background: var(--allow-bg); color: #4ade80; border: 1px solid var(--allow); }
+  .badge.partial { background: var(--warn-bg); color: #fbbf24; border: 1px solid var(--warn); }
+  .badge.shadowed { background: var(--deny-bg); color: #f87171; border: 1px solid var(--deny); }
+  .badge.conflict { background: var(--deny-bg); color: #fca5a5; border: 1px solid var(--deny); }
+  .badge.redundant { background: #1f2937; color: #fbbf24; border: 1px solid var(--warn); }
+  .badge.same { background: #16213a; color: #93c5fd; border: 1px solid #3b82f6; }
+  .rule-card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 18px; margin-bottom: 16px; border-left-width: 4px;
+  }
+  .rule-card.fully-effective { border-left-color: var(--allow); }
+  .rule-card.partially-effective { border-left-color: var(--warn); }
+  .rule-card.fully-shadowed { border-left-color: var(--deny); }
+  .rule-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .rule-head h3 { margin: 0; font-size: 15px; }
+  .rule-head .rid { color: var(--muted); font-size: 12.5px; }
+  table.kv { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.kv td { padding: 4px 6px; vertical-align: top; }
+  table.kv td:first-child { color: var(--muted); width: 110px; white-space: nowrap; }
+  table.kv td code { color: #bae6fd; }
+  .meter { height: 10px; border-radius: 999px; overflow: hidden; display: flex; background: var(--deny); margin: 10px 0 4px; }
+  .meter .eff { background: var(--allow); height: 100%; }
+  .meter-legend { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .sub { margin: 14px 0 8px; font-size: 13px; font-weight: 700; color: var(--muted); }
+  .blocks { display: grid; grid-template-columns: repeat(auto-fill, minmax(430px, 1fr)); gap: 12px; }
+  .block {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; border-left-width: 4px; font-size: 12.5px;
+  }
+  .block.eff { border-left-color: var(--allow); }
+  .block.shd-conflict { border-left-color: var(--deny); }
+  .block.shd-same { border-left-color: #3b82f6; }
+  .block h5 { margin: 0 0 6px; font-size: 12.5px; color: var(--text); }
+  .block .pkt { margin-top: 6px; color: var(--muted); }
+  .block .pkt code { color: #bae6fd; }
+  .suggestion {
+    margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
+    background: #0b1220; border: 1px solid var(--line); color: #cbd5e1;
+  }
+  .suggestion b { color: var(--accent); }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 2px; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+</style>
+</head>
+<body>
+<nav class="topnav">
+  <a href="/">变更差分</a>
+  <a href="/audit" class="active">规则有效性审计</a>
+</nav>
+<header>
+  <h1>规则有效性审计（IPv4 / TCP，首条匹配，默认拒绝）</h1>
+  <p>粘贴一份有序规则集（≤ 20 条），系统用边界切分精确计算每条规则在源地址 × 目的地址 × 目的端口上真正生效的区域，
+     区分完全遮蔽 / 部分生效 / 完全生效与 allow-deny 动作冲突，并给出遮蔽来源、代表报文与重排、删除建议。不做抽样。</p>
+</header>
+
+<main>
+  <div class="toolbar">
+    <button class="primary" id="btn-audit" type="button">开始审计</button>
+    <button id="btn-example" type="button">载入遮蔽示例</button>
+    <button id="btn-clear" type="button">清空输入与结果</button>
+  </div>
+
+  <div class="editor-card">
+    <h2>有序规则集（按匹配顺序，首条命中生效）</h2>
+    <textarea id="rules" spellcheck="false" placeholder="在此粘贴 JSON 规则数组…"></textarea>
+  </div>
+
+  <div class="schema-help">
+    <strong>规则格式</strong>：数组，每条规则为对象，字段
+    <code>id</code>（整数或非空字符串，同一份内唯一）、
+    <code>source</code> 与 <code>destination</code>（严格 IPv4 CIDR，主机位须为 0，如 <code>10.0.0.0/24</code>，全网用 <code>0.0.0.0/0</code>，单机用 <code>/32</code>）、
+    <code>portRange</code>（目的端口闭区间 <code>[下界, 上界]</code>，0-65535 整数）、
+    <code>action</code>（小写 <code>allow</code> 或 <code>deny</code>）。匹配按数组顺序，首条命中生效；全部未命中即默认拒绝。
+    <pre>[
+  {
+    "id": 1,
+    "source": "10.0.0.0/8",
+    "destination": "172.16.0.0/12",
+    "portRange": [80, 443],
+    "action": "allow"
+  }
+]</pre>
+  </div>
+
+  <div id="errors" role="alert"></div>
+  <div id="results"></div>
+</main>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+function showErrors(errors) {
+  // 输入无效：清除旧结果
+  $("results").innerHTML = "";
+  const box = $("errors");
+  const items = errors.map((e) => {
+    const parts = [];
+    parts.push(e.sheet === "rules" ? "【规则集】" : "");
+    if (e.ruleIndex != null) parts.push(`第 ${e.ruleIndex} 条规则`);
+    if (e.field) parts.push(`字段 ${e.field}`);
+    if (e.line != null) parts.push(`JSON 第 ${e.line} 行第 ${e.col} 列`);
+    const loc = parts.length ? `<span class="loc">${escapeHtml(parts.join(" · "))}：</span>` : "";
+    return `<li>${loc}${escapeHtml(e.message)}</li>`;
+  }).join("");
+  box.innerHTML = `<h3>输入无效，未执行审计（旧结果已清除），共 ${errors.length} 处问题：</h3><ul>${items}</ul>`;
+  box.classList.add("show");
+  box.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function clearErrors() {
+  const box = $("errors");
+  box.classList.remove("show");
+  box.innerHTML = "";
+}
+
+function formatBigInt(s) {
+  // 后端以字符串传递超大整数，按千分位展示
+  return String(s).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function ipIntervalHtml(iv) {
+  const cidr = iv.cidr ? ` <span class="hint">（即 ${escapeHtml(iv.cidr)}）</span>` : "";
+  return `<code>${escapeHtml(iv.start)} – ${escapeHtml(iv.end)}</code>${cidr}`;
+}
+
+function actionBadge(action) {
+  return action === "allow"
+    ? '<span class="badge allow">ALLOW 放行</span>'
+    : '<span class="badge deny">DENY 阻断</span>';
+}
+
+const STATUS_BADGE = {
+  "fully-effective": '<span class="badge ok">完全生效</span>',
+  "partially-effective": '<span class="badge partial">部分生效</span>',
+  "fully-shadowed": '<span class="badge shadowed">完全遮蔽</span>',
+};
+
+function packetHtml(p) {
+  return `<strong>TCP</strong> &nbsp; <code>${escapeHtml(p.sourceIp)}</code> →
+    <code>${escapeHtml(p.destinationIp)}</code> : <code>${escapeHtml(p.destinationPort)}</code>`;
+}
+
+function effBlockHtml(b, index) {
+  return `
+  <div class="block eff">
+    <h5>生效区域 #${index + 1} <span class="hint">（${formatBigInt(b.packetCount)} 个报文）</span></h5>
+    <table class="kv">
+      <tr><td>源地址</td><td>${ipIntervalHtml(b.source)}</td></tr>
+      <tr><td>目的地址</td><td>${ipIntervalHtml(b.destination)}</td></tr>
+      <tr><td>目的端口</td><td><code>${escapeHtml(b.port.label)}</code></td></tr>
+    </table>
+    <div class="pkt">代表报文：${packetHtml(b.representativePacket)}
+      <div class="hint">取各区间最小端点；该区域内任意报文都首条命中本规则。</div></div>
+  </div>`;
+}
+
+function shdBlockHtml(b, index) {
+  const rel = b.relation === "conflict"
+    ? '<span class="badge conflict">动作冲突</span>'
+    : '<span class="badge same">动作一致</span>';
+  const cls = b.relation === "conflict" ? "shd-conflict" : "shd-same";
+  const sh = b.shadowedBy;
+  return `
+  <div class="block ${cls}">
+    <h5>被遮蔽区域 #${index + 1} ${rel}
+      <span class="hint">（${formatBigInt(b.packetCount)} 个报文）</span></h5>
+    <table class="kv">
+      <tr><td>遮蔽来源</td><td>前置规则 #${escapeHtml(sh.ruleOrder)}，
+        id=<code>${escapeHtml(sh.ruleId)}</code> ${actionBadge(sh.action)}</td></tr>
+      <tr><td>源地址</td><td>${ipIntervalHtml(b.source)}</td></tr>
+      <tr><td>目的地址</td><td>${ipIntervalHtml(b.destination)}</td></tr>
+      <tr><td>目的端口</td><td><code>${escapeHtml(b.port.label)}</code></td></tr>
+    </table>
+    <div class="pkt">代表报文：${packetHtml(b.representativePacket)}
+      <div class="hint">该报文实际首条命中前置规则 #${escapeHtml(sh.ruleOrder)}，而非本规则。</div></div>
+  </div>`;
+}
+
+function ruleCardHtml(r) {
+  const conflictBadge = r.actionConflict
+    ? '<span class="badge conflict">allow/deny 动作冲突</span>' : "";
+  const redundantBadge = (r.status === "fully-shadowed" && !r.actionConflict)
+    ? '<span class="badge redundant">冗余 · 可安全删除</span>' : "";
+
+  const effBlocks = r.effectiveBlocks.length
+    ? `<div class="blocks">${r.effectiveBlocks.map((b, i) => effBlockHtml(b, i)).join("")}</div>`
+    : `<div class="empty">无生效区域：声明区域被前置规则完全遮蔽。</div>`;
+  const shdBlocks = r.shadowedBlocks.length
+    ? `<div class="blocks">${r.shadowedBlocks.map((b, i) => shdBlockHtml(b, i)).join("")}</div>`
+    : `<div class="empty">无被遮蔽区域：声明区域内没有前置规则竞争。</div>`;
+
+  return `
+  <div class="rule-card ${r.status}">
+    <div class="rule-head">
+      <h3>规则 #${r.ruleIndex}</h3>
+      <span class="rid">id=<code>${escapeHtml(r.ruleId)}</code></span>
+      ${actionBadge(r.action)}
+      ${STATUS_BADGE[r.status]}
+      ${conflictBadge}
+      ${redundantBadge}
+    </div>
+    <table class="kv">
+      <tr><td>声明源地址</td><td>${ipIntervalHtml(r.declared.source)}</td></tr>
+      <tr><td>声明目的地址</td><td>${ipIntervalHtml(r.declared.destination)}</td></tr>
+      <tr><td>声明目的端口</td><td><code>${escapeHtml(r.declared.port.label)}</code>
+        <span class="hint">（${formatBigInt(r.declared.port.portCount)} 个端口）</span></td></tr>
+      <tr><td>声明报文数</td><td><span class="mono">${formatBigInt(r.declaredPacketCount)}</span></td></tr>
+      <tr><td>真正生效</td><td><span class="mono">${formatBigInt(r.effectivePacketCount)}</span>
+        <span class="hint">（${escapeHtml(r.effectivePercent)}%）</span></td></tr>
+      <tr><td>被前置遮蔽</td><td><span class="mono">${formatBigInt(r.shadowedPacketCount)}</span>
+        <span class="hint">（${escapeHtml(r.shadowedPercent)}%）</span></td></tr>
+    </table>
+    <div class="meter"><div class="eff" style="width:${escapeHtml(r.effectivePercent)}%"></div></div>
+    <div class="meter-legend"><span>■ 生效 ${escapeHtml(r.effectivePercent)}%</span>
+      <span>被遮蔽 ${escapeHtml(r.shadowedPercent)}% ■</span></div>
+    <div class="sub">真正生效的区域（首条命中本规则）</div>
+    ${effBlocks}
+    <div class="sub">被前置规则遮蔽的区域（本规则不生效）</div>
+    ${shdBlocks}
+    <div class="suggestion"><b>建议：</b>${escapeHtml(r.suggestion)}</div>
+  </div>`;
+}
+
+function renderResults(data) {
+  clearErrors();
+  const r = data.result;
+  const s = r.summary;
+  const bar = `
+    <div class="summary-bar">
+      <span>规则 <b>${s.ruleCount}</b> 条</span>
+      <span>完全生效 <b>${s.fullyEffectiveCount}</b></span>
+      <span>部分生效 <b>${s.partiallyEffectiveCount}</b></span>
+      <span>完全遮蔽 <b>${s.fullyShadowedCount}</b></span>
+      <span>存在动作冲突 <b>${s.conflictRuleCount}</b></span>
+      <span>冗余可删 <b>${s.redundantRuleCount}</b></span>
+    </div>`;
+  const cards = r.rules.length
+    ? r.rules.map((rule) => ruleCardHtml(rule)).join("")
+    : `<div class="empty">规则集为空：所有流量命中默认拒绝（DEFAULT DENY）。</div>`;
+  $("results").innerHTML = bar + cards;
+}
+
+async function audit() {
+  const text = $("rules").value;
+  const btn = $("btn-audit");
+  btn.disabled = true;
+  try {
+    const resp = await fetch("/api/audit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rules: text }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.ok) {
+      showErrors(data.errors || [{ sheet: null, message: "未知错误" }]);
+      return;
+    }
+    renderResults(data);
+  } catch (err) {
+    showErrors([{ sheet: null, message: `请求失败：${err}` }]);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadExample() {
+  try {
+    const resp = await fetch("/api/audit/example");
+    const data = await resp.json();
+    $("rules").value = JSON.stringify(data.rules, null, 2);
+    clearErrors();
+    $("results").innerHTML = "";
+  } catch (err) {
+    showErrors([{ sheet: null, message: `示例加载失败：${err}` }]);
+  }
+}
+
+$("btn-audit").addEventListener("click", audit);
+$("btn-example").addEventListener("click", loadExample);
+$("btn-clear").addEventListener("click", () => {
+  $("rules").value = "";
+  clearErrors();
+  $("results").innerHTML = "";
+});
+</script>
+</body>
+</html>

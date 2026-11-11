@@ -71,3 +71,50 @@ EXAMPLE_NEW = [
 ]
 
 EXAMPLE_PAYLOAD = {"old": EXAMPLE_OLD, "new": EXAMPLE_NEW}
+
+# --------------------------------------------------------------------------- #
+# 规则有效性审计示例：一份规则集内同时演示四种典型情形
+#   * id=2：被 id=1 的宽 deny 完全遮蔽且动作冲突（allow 永不生效）；
+#   * id=3：被 id=1 完全遮蔽但动作一致（冗余，删除不影响任何判定）；
+#   * id=4：不与任何前置规则重叠，完全生效；
+#   * id=5：端口 1-1024 段被 id=1 遮蔽（冲突），1025-2048 段真正生效（部分生效）。
+# --------------------------------------------------------------------------- #
+EXAMPLE_AUDIT = [
+    {
+        "id": 1,
+        "source": "10.0.0.0/8",
+        "destination": "172.16.0.0/12",
+        "portRange": [1, 1024],
+        "action": "deny",
+    },
+    {
+        "id": 2,
+        "source": "10.1.0.0/16",
+        "destination": "172.16.5.0/24",
+        "portRange": [80, 80],
+        "action": "allow",
+    },
+    {
+        "id": 3,
+        "source": "10.2.0.0/16",
+        "destination": "172.16.9.0/24",
+        "portRange": [443, 443],
+        "action": "deny",
+    },
+    {
+        "id": 4,
+        "source": "10.0.0.0/8",
+        "destination": "172.16.0.0/12",
+        "portRange": [8080, 8080],
+        "action": "allow",
+    },
+    {
+        "id": 5,
+        "source": "10.3.0.0/16",
+        "destination": "172.16.0.0/12",
+        "portRange": [1, 2048],
+        "action": "allow",
+    },
+]
+
+AUDIT_EXAMPLE_PAYLOAD = {"rules": EXAMPLE_AUDIT}
